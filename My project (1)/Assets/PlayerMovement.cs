@@ -1,20 +1,27 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 
+[RequireComponent(typeof(CharacterController))]
 public class PlayerMovement : MonoBehaviour
 {
     public CharacterController controller;
     public float speed = 5f;
     public float gravity = -9.81f;
+    public Transform cameraTransform; // assign your main camera for movement direction
 
     private Vector3 velocity;
+    private bool isGrounded;
 
     void Update()
     {
-        if (Keyboard.current == null)
-            return;
+        if (Keyboard.current == null) return;
 
-        // Read WASD input
+        // Ground check
+        isGrounded = controller.isGrounded;
+        if (isGrounded && velocity.y < 0f)
+            velocity.y = 0f;
+
+        // WASD input
         float x = 0f;
         float z = 0f;
 
@@ -23,11 +30,20 @@ public class PlayerMovement : MonoBehaviour
         if (Keyboard.current.aKey.isPressed) x -= 1f;
         if (Keyboard.current.dKey.isPressed) x += 1f;
 
-        Vector3 move = transform.right * x + transform.forward * z;
+        // Movement relative to camera
+        Vector3 forward = cameraTransform.forward;
+        Vector3 right = cameraTransform.right;
 
+        // Project on horizontal plane
+        forward.y = 0f;
+        right.y = 0f;
+        forward.Normalize();
+        right.Normalize();
+
+        Vector3 move = forward * z + right * x;
         controller.Move(move.normalized * speed * Time.deltaTime);
 
-        // Apply gravity
+        // Gravity
         velocity.y += gravity * Time.deltaTime;
         controller.Move(velocity * Time.deltaTime);
     }
