@@ -1,12 +1,16 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.EventSystems;
 
 /// <summary>
-/// Handles single-person tracking logic for ZED camera.
-/// - Detects multiple people but focuses on one (nearest or locked)
-/// - Lock/unlock with L key
-/// - Exposes target ID and pose for other scripts (e.g. PortalFollower)
+/// Single-person tracking using ZED Body Tracking.
+/// - Mouse click to select target (screen-space nearest to cursor)
+/// - Press L to Lock/Unlock
+/// - Hard lock / Soft lock with grace
+/// - Reattach when target re-enters (same ID first, else nearest-to-last-known)
+/// - Pushes selectedId/onlyShowSelectedBox to ZED3DObjectVisualizer
+/// - Tidy HUD with configurable origin
 /// </summary>
 public class SingleTargetDetection : MonoBehaviour
 {
@@ -14,30 +18,52 @@ public class SingleTargetDetection : MonoBehaviour
     [Tooltip("Assign the ZED_Rig_Mono (object containing ZEDManager).")]
     public ZEDManager zedManager;
 
-    [Tooltip("Optional: assign the visualizer to hide non-selected boxes when locked.")]
+    [Tooltip("Optional: ZED3DObjectVisualizer to filter/hide boxes when locked.")]
     public ZED3DObjectVisualizer visualizer;
 
-    [Header("Keys")]
-    [Tooltip("Press this key to toggle lock/unlock.")]
+    [Tooltip("Camera for screen-space selection. Drag Camera_Left here.")]
+    public Camera selectionCamera;
+
+    [Header("Input")]
+    [Tooltip("Mouse button to select (0=Left).")]
+    public int mouseButton = 0;
+
+    [Tooltip("Lock/Unlock key.")]
     public KeyCode lockKey = KeyCode.L;
 
     [Header("Lock policy")]
     [Tooltip("If true, never auto-switch while locked (manual unlock required).")]
     public bool hardLock = true;
 
-    [Tooltip("Soft lock only: auto-unlock if target missing for this many seconds.")]
+    [Tooltip("Soft lock only: auto-unlock if missing beyond this time (seconds).")]
     public float softLockMissingGraceSeconds = 2.0f;
 
-    // runtime state
+    [Header("Reattach")]
+    [Tooltip("Try to reattach when target re-enters view.")]
+    public bool tryReattach = true;
+
+    [Tooltip("Max 3D distance from last-known pos to accept as same target when ID changed.")]
+    public float reattachMaxMeters = 1.2f;
+
+    [Tooltip("Require reattached body be the nearest to last-known pos.")]
+    public bool reattachRequireNearest = true;
+
+    [Header("UI")]
+    public bool showHUD = true;
+    public Vector2 hudStart = new Vector2(10, 10); // HUD 起点（本脚本放更靠上）
+
+    // Runtime state
     private bool locked = false;
     private int? targetId = null;
     private float selectedDistanceM = 0f;
 
-    // soft-lock tracking
     private float? missingSince = null;
+    private Vector3 lastKnownWorldPos = Vector3.zero;
 
-    // cache detections
-    private List<DetectedObject> lastFrameObjects = new List<DetectedObject>();
+    private List<DetectedBody> lastFrameBodies = new List<DetectedBody>();
+
+    // Public read-only lock state (for other scripts)
+    public bool IsLocked => locked;
 
     void Start()
     {
@@ -46,33 +72,60 @@ public class SingleTargetDetection : MonoBehaviour
             zedManager = FindAnyObjectByType<ZEDManager>();
             if (!zedManager)
             {
-                Debug.LogError("SingleTargetDetection: ZEDManager not found in scene.");
+                Debug.LogError("SingleTargetDetection: ZEDManager not found.");
                 enabled = false;
                 return;
             }
         }
 
-        if (!visualizer)
+        if (!visualizer) visualizer = FindAnyObjectByType<ZED3DObjectVisualizer>();
+
+        if (!selectionCamera)
         {
-            visualizer = FindAnyObjectByType<ZED3DObjectVisualizer>();
+            selectionCamera = Camera.main;
+            if (!selectionCamera)
+            {
+                var camT = zedManager.GetLeftCameraTransform();
+                selectionCamera = camT ? camT.GetComponent<Camera>() : null;
+            }
         }
 
         zedManager.OnZEDReady += OnZEDReady;
-        zedManager.OnObjectDetection += OnObjectDetections;
-        zedManager.OnStopObjectDetection += OnStopDetection;
+        zedManager.OnBodyTracking += OnBodyDetections;
+        zedManager.OnStopObjectDetection += OnStopDetection; // SDK stop event is reused
     }
 
     private void OnZEDReady()
     {
-        if (!zedManager.IsObjectDetectionRunning)
+        // 保险：确保只跑 BodyTracking，不跑 ObjectDetection
+        if (zedManager.IsObjectDetectionRunning)
+            zedManager.StopObjectDetection();
+
+        if (!zedManager.IsBodyTrackingRunning)
+            zedManager.StartBodyTracking();
+
+        if (!selectionCamera)
         {
-            zedManager.StartObjectDetection();
+            selectionCamera = Camera.main;
+            if (!selectionCamera)
+            {
+                var camT = zedManager.GetLeftCameraTransform();
+                selectionCamera = camT ? camT.GetComponent<Camera>() : null;
+            }
         }
+    }
+
+    private void OnDestroy()
+    {
+        if (!zedManager) return;
+        zedManager.OnZEDReady -= OnZEDReady;
+        zedManager.OnBodyTracking -= OnBodyDetections;
+        zedManager.OnStopObjectDetection -= OnStopDetection;
     }
 
     private void OnStopDetection()
     {
-        lastFrameObjects.Clear();
+        lastFrameBodies.Clear();
         targetId = null;
         locked = false;
         selectedDistanceM = 0f;
@@ -85,22 +138,15 @@ public class SingleTargetDetection : MonoBehaviour
         }
     }
 
-    private void OnDestroy()
+    private void OnBodyDetections(BodyTrackingFrame frame)
     {
-        if (!zedManager) return;
-        zedManager.OnZEDReady -= OnZEDReady;
-        zedManager.OnObjectDetection -= OnObjectDetections;
-        zedManager.OnStopObjectDetection -= OnStopDetection;
-    }
-
-    private void OnObjectDetections(ObjectDetectionFrame frame)
-    {
-        lastFrameObjects = frame.GetFilteredObjectList(true, false, false);
+        // 放宽过滤，便于点选
+        lastFrameBodies = frame.GetFilteredObjectList(true, true, true);
     }
 
     void Update()
     {
-        // toggle lock
+        // Toggle lock
         if (Input.GetKeyDown(lockKey))
         {
             locked = !locked;
@@ -111,7 +157,18 @@ public class SingleTargetDetection : MonoBehaviour
             }
         }
 
-        if (lastFrameObjects == null || lastFrameObjects.Count == 0)
+        // Mouse selection
+        if (Input.GetMouseButtonDown(mouseButton))
+        {
+            TrySelectByMouse();
+            if (targetId.HasValue && !locked)
+            {
+                locked = true; // click-then-lock
+                missingSince = null;
+            }
+        }
+
+        if (lastFrameBodies == null || lastFrameBodies.Count == 0)
         {
             HandleMissing();
             PushSelectionToVisualizer();
@@ -120,34 +177,139 @@ public class SingleTargetDetection : MonoBehaviour
 
         if (locked && targetId.HasValue)
         {
-            bool present = lastFrameObjects.Any(o => o.id == targetId.Value);
-
-            if (present)
+            var current = lastFrameBodies.FirstOrDefault(b => b.id == targetId.Value);
+            if (current != null)
             {
                 missingSince = null;
-                UpdateDistanceToCurrent();
+                UpdateDistanceAndLastKnown(current);
             }
             else
             {
-                HandleMissing();
+                TryReattachOrHandleMissing();
             }
 
             PushSelectionToVisualizer();
             return;
         }
 
-        // not locked → auto select nearest
-        ChooseNearest();
-        UpdateDistanceToCurrent();
+        // Not locked → auto pick nearest
+        AutoPickNearest();
+        if (targetId.HasValue)
+        {
+            var sel = lastFrameBodies.FirstOrDefault(b => b.id == targetId.Value);
+            if (sel != null) UpdateDistanceAndLastKnown(sel);
+        }
+
         PushSelectionToVisualizer();
+    }
+
+    private void TrySelectByMouse()
+    {
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject()) return;
+        if (!selectionCamera)
+        {
+            selectionCamera = Camera.main;
+            if (!selectionCamera)
+            {
+                Debug.LogWarning("[SingleTargetDetection] No selectionCamera found!");
+                return;
+            }
+        }
+        if (lastFrameBodies == null || lastFrameBodies.Count == 0) return;
+
+        Vector2 mouse = Input.mousePosition;
+        float best = float.MaxValue;
+        int? bestIdLocal = null;
+        const float pickRadius = 80f; // 像素点击半径
+
+        foreach (var b in lastFrameBodies)
+        {
+            Vector3 wpos = b.Get3DWorldPosition();
+            if (ZEDSupportFunctions.IsVector3NaN(wpos)) continue;
+
+            Vector3 sp = selectionCamera.WorldToScreenPoint(wpos);
+            if (sp.z <= 0f) continue; // 在摄像机后面
+
+            float dist = (new Vector2(sp.x, sp.y) - mouse).sqrMagnitude;
+            if (dist < best)
+            {
+                best = dist;
+                bestIdLocal = b.id;
+            }
+        }
+
+        if (bestIdLocal.HasValue && best <= pickRadius * pickRadius)
+        {
+            targetId = bestIdLocal.Value;
+            locked = true;
+            missingSince = null;
+
+            var sel = lastFrameBodies.FirstOrDefault(x => x.id == targetId.Value);
+            if (sel != null) UpdateDistanceAndLastKnown(sel);
+
+            Debug.Log("[SingleTargetDetection] Selected ID: " + targetId.Value);
+        }
+    }
+
+    private void AutoPickNearest()
+    {
+        Transform cam = selectionCamera ? selectionCamera.transform
+                         : (zedManager ? zedManager.GetLeftCameraTransform()
+                                       : Camera.main ? Camera.main.transform : null);
+        if (!cam) return;
+
+        var nearest = lastFrameBodies
+            .OrderBy(b => (b.Get3DWorldPosition() - cam.position).sqrMagnitude)
+            .FirstOrDefault();
+
+        if (nearest != null)
+        {
+            targetId = nearest.id;
+            UpdateDistanceAndLastKnown(nearest);
+        }
+    }
+
+    private void TryReattachOrHandleMissing()
+    {
+        if (!(locked && tryReattach))
+        {
+            HandleMissing();
+            return;
+        }
+
+        var same = targetId.HasValue ? lastFrameBodies.FirstOrDefault(b => b.id == targetId.Value) : null;
+        if (same != null)
+        {
+            missingSince = null;
+            UpdateDistanceAndLastKnown(same);
+            return;
+        }
+
+        if (lastFrameBodies.Count > 0)
+        {
+            var byDist = lastFrameBodies
+                .Select(b => new { body = b, d = Vector3.Distance(lastKnownWorldPos, b.Get3DWorldPosition()) })
+                .OrderBy(x => x.d)
+                .FirstOrDefault();
+
+            if (byDist != null && byDist.d <= reattachMaxMeters)
+            {
+                targetId = byDist.body.id;
+                UpdateDistanceAndLastKnown(byDist.body);
+                missingSince = null;
+                return;
+            }
+        }
+
+        HandleMissing();
     }
 
     private void HandleMissing()
     {
         if (locked && hardLock)
         {
-            selectedDistanceM = 0f;
             if (missingSince == null) missingSince = Time.time;
+            selectedDistanceM = 0f;
             return;
         }
 
@@ -169,28 +331,16 @@ public class SingleTargetDetection : MonoBehaviour
         missingSince = null;
     }
 
-    private void ChooseNearest()
+    private void UpdateDistanceAndLastKnown(DetectedBody body)
     {
-        Transform cam = zedManager ? zedManager.GetLeftCameraTransform() : Camera.main.transform;
-        var nearest = lastFrameObjects
-            .OrderBy(o => (o.Get3DWorldPosition() - cam.position).sqrMagnitude)
-            .FirstOrDefault();
+        Transform cam = selectionCamera ? selectionCamera.transform
+                         : (zedManager ? zedManager.GetLeftCameraTransform()
+                                       : Camera.main ? Camera.main.transform : null);
+        if (!cam) return;
 
-        if (nearest != null)
-        {
-            targetId = nearest.id;
-        }
-    }
-
-    private void UpdateDistanceToCurrent()
-    {
-        if (!targetId.HasValue) { selectedDistanceM = 0f; return; }
-
-        var sel = lastFrameObjects.FirstOrDefault(o => o.id == targetId.Value);
-        if (sel == null) { selectedDistanceM = 0f; return; }
-
-        Transform cam = zedManager ? zedManager.GetLeftCameraTransform() : Camera.main.transform;
-        selectedDistanceM = Vector3.Distance(cam.position, sel.Get3DWorldPosition());
+        Vector3 wpos = body.Get3DWorldPosition();
+        selectedDistanceM = Vector3.Distance(cam.position, wpos);
+        lastKnownWorldPos = wpos;
     }
 
     private void PushSelectionToVisualizer()
@@ -200,53 +350,73 @@ public class SingleTargetDetection : MonoBehaviour
         visualizer.onlyShowSelectedBox = locked;
     }
 
-    void OnGUI()
+    // ===== HUD =====
+    private static void DrawShadowedLabel(Rect r, string text, GUIStyle style)
     {
-        string idStr = targetId.HasValue ? targetId.Value.ToString() : "None";
-        string status = locked ? "Locked" : "Unlocked";
-
-        if (locked && targetId.HasValue && (missingSince != null))
-        {
-            status += " (LOST)";
-        }
-
-        GUI.Label(new Rect(10, 10, 520, 22),
-            $"Target ID: {idStr}  |  {status}  |  Distance: {selectedDistanceM:F2} m");
-        GUI.Label(new Rect(10, 30, 520, 22),
-            $"Press '{lockKey}' to Lock/Unlock  |  HardLock: {hardLock}  |  Grace: {softLockMissingGraceSeconds:F1}s");
+        var old = style.normal.textColor;
+        style.normal.textColor = Color.black;
+        GUI.Label(new Rect(r.x + 1, r.y + 1, r.width, r.height), text, style);
+        style.normal.textColor = old;
+        GUI.Label(r, text, style);
     }
 
-    // === Public getters for other scripts (e.g. PortalFollower) ===
+    void OnGUI()
+    {
+        if (!showHUD) return;
 
-    /// <summary>
-    /// Returns the currently selected target ID, or -1 if none.
-    /// </summary>
+        float x = hudStart.x;
+        float y = hudStart.y;
+        float w = 720f;
+        float h = 22f;
+        float pad = 6f;
+
+        // 半透明底板
+        Color oldCol = GUI.color;
+        GUI.color = new Color(0, 0, 0, 0.35f);
+        GUI.Box(new Rect(x - 6, y - 6, w + 12, h * 3 + pad * 2 + 12), GUIContent.none);
+        GUI.color = oldCol;
+
+        var style = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 14,
+            normal = { textColor = Color.white },
+            alignment = TextAnchor.UpperLeft
+        };
+
+        string idStr = targetId.HasValue ? targetId.Value.ToString() : "None";
+        string status = locked ? "Locked" : "Unlocked";
+        if (locked && targetId.HasValue && (missingSince != null)) status += " (LOST)";
+
+        DrawShadowedLabel(new Rect(x, y, w, h),
+            "[BodyTracking] Target ID: " + idStr + "  |  " + status + "  |  Distance: " + selectedDistanceM.ToString("F2") + " m", style);
+        y += h + pad;
+
+        DrawShadowedLabel(new Rect(x, y, w, h),
+            "Mouse select | '" + lockKey + "' Lock/Unlock | HardLock: " + hardLock + " | Grace: " + softLockMissingGraceSeconds.ToString("F1") + "s | Reattach<=" + reattachMaxMeters.ToString("F1") + "m", style);
+        y += h + pad;
+
+        DrawShadowedLabel(new Rect(x, y, w, h),
+            "SelCam: " + (selectionCamera ? selectionCamera.name : "NULL") + " | Bodies: " + (lastFrameBodies != null ? lastFrameBodies.Count : 0), style);
+    }
+
+    // ===== Public API =====
+    /// <summary>Return current target ID, or -1 if none.</summary>
     public int GetCurrentTargetId()
     {
         return targetId.HasValue ? targetId.Value : -1;
     }
 
-    /// <summary>
-    /// Try to get the current target's world position & rotation.
-    /// Returns true if a valid target exists in current frame.
-    /// </summary>
+    /// <summary>Try to get current target pose. Returns true if valid this frame.</summary>
     public bool TryGetTargetPose(out int id, out Vector3 position, out Quaternion rotation)
     {
-        id = -1;
-        position = Vector3.zero;
-        rotation = Quaternion.identity;
-
-        if (!targetId.HasValue) return false;
-        id = targetId.Value;
-
-        var sel = lastFrameObjects.FirstOrDefault(o => o.id == targetId.Value);
+        id = -1; position = Vector3.zero; rotation = Quaternion.identity;
+        if (!targetId.HasValue || lastFrameBodies == null) return false;
+        var sel = lastFrameBodies.FirstOrDefault(o => o.id == targetId.Value);
         if (sel == null) return false;
 
+        id = targetId.Value;
         position = sel.Get3DWorldPosition();
         rotation = sel.Get3DWorldRotation(false);
         return true;
     }
 }
-
-
-

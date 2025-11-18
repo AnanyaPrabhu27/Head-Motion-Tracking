@@ -313,9 +313,73 @@ PrefabInstance:
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
-    m_AddedGameObjects: []
+    m_AddedGameObjects:
+    - targetCorrespondingSourceObject: {fileID: 4329734432191940, guid: 7263d5b72710b344c9966f1befbca3e9, type: 3}
+      insertIndex: 0
+      addedObject: {fileID: 870758706}
     m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 7263d5b72710b344c9966f1befbca3e9, type: 3}
+--- !u!1 &870758705
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 870758706}
+  - component: {fileID: 870758707}
+  m_Layer: 0
+  m_Name: BodyFacialMarker
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &870758706
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 870758705}
+  serializedVersion: 2
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: -0.13108051, y: 0.21661802, z: 0.68619037}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 2001318967}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &870758707
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 870758705}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: edc8ebdce1e3a6345aad06bb5f35f4bc, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  zedManager: {fileID: 164734254}
+  visualizer: {fileID: 1840412901}
+  tracker: {fileID: 0}
+  noseIndex: 0
+  leftEyeIndex: 15
+  rightEyeIndex: 14
+  markerRadius: 0.03
+  noseColor: {r: 1, g: 0, b: 0, a: 1}
+  leftEyeColor: {r: 0, g: 1, b: 0, a: 1}
+  rightEyeColor: {r: 0, g: 0, b: 1, a: 1}
+  showHUD: 1
+  hudStart: {x: 10, y: 80}
+--- !u!20 &1359711470 stripped
+Camera:
+  m_CorrespondingSourceObject: {fileID: 20287226139793380, guid: 7263d5b72710b344c9966f1befbca3e9, type: 3}
+  m_PrefabInstance: {fileID: 595138850}
+  m_PrefabAsset: {fileID: 0}
 --- !u!1 &1840412898
 GameObject:
   m_ObjectHideFlags: 0
@@ -362,7 +426,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   zedManager: {fileID: 0}
-  detectionMode: 0
+  detectionMode: 1
   startAIModuleAutomatically: 1
   boundingBoxPrefab: {fileID: 1438017172825460, guid: 2d803190bc4738d4daf5932468a5495e, type: 3}
   boxColors:
@@ -395,9 +459,21 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   zedManager: {fileID: 164734254}
   visualizer: {fileID: 0}
+  selectionCamera: {fileID: 1359711470}
+  mouseButton: 0
   lockKey: 108
   hardLock: 1
   softLockMissingGraceSeconds: 2
+  tryReattach: 1
+  reattachMaxMeters: 1.2
+  reattachRequireNearest: 1
+  showHUD: 1
+  hudStart: {x: 10, y: 10}
+--- !u!4 &2001318967 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 4329734432191940, guid: 7263d5b72710b344c9966f1befbca3e9, type: 3}
+  m_PrefabInstance: {fileID: 595138850}
+  m_PrefabAsset: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
